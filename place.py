@@ -13,17 +13,19 @@ import re
 import sys
 import time
 import calendar
+import zipfile
 from dataclasses import dataclass
 from datetime import date
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from urllib.parse import urljoin
+from urllib.parse import parse_qs, urljoin, urlparse
 from configparser import ConfigParser
 
 import requests
 from bs4 import BeautifulSoup
 from tqdm import tqdm
 
-from services.scraper import BaseScraper
+from services.scraper import BaseScraper, DceDownloadResult
 from services.database import AORecord
 from services.config_utils import parse_list_value
 
@@ -55,6 +57,8 @@ class PlaceScraper(BaseScraper):
     # --- Constantes de classe ---
     _BASE = "https://www.marches-publics.gouv.fr"
     _SEARCH_URL = _BASE + "/?page=Entreprise.EntrepriseAdvancedSearch&searchAnnCons"
+    _DCE_DOWNLOAD_PAGE = _BASE + "/index.php?page=Entreprise.EntrepriseDemandeTelechargementDce"
+    _DCE_POSTBACK_TARGET = "ctl0$CONTENU_PAGE$EntrepriseDownloadDce$completeDownload"
     _PRADO_NEXT_PAGE_TARGET = "ctl0$CONTENU_PAGE$resultSearch$PagerTop$ctl2"
     _PRADO_NEXT_PAGE_ID     = "ctl0_CONTENU_PAGE_resultSearch_PagerTop_ctl2"
 
@@ -81,6 +85,7 @@ class PlaceScraper(BaseScraper):
         self._cpv_codes: List[str] = parse_list_value(raw_codes)
         self._max_pages: int = config.getint("PLACE", "MAX_PAGES", fallback=200)
         self._sleep: float = config.getfloat("PLACE", "SLEEP", fallback=0.3)
+        self._latest_consultations: Dict[str, Consultation] = {}
 
     def scrape(self) -> List[AORecord]:
         session = self._make_session()
@@ -107,6 +112,7 @@ class PlaceScraper(BaseScraper):
                 date_parution="N/C",
                 data_source="place",
             ))
+        self._latest_consultations = seen
         return records
 
     @staticmethod
@@ -403,3 +409,213 @@ class PlaceScraper(BaseScraper):
                     cpv_map[cid].append(cpv_code)
 
         return all_seen, cpv_map
+
+    # -----------------------------------------------------------------------
+    # DCE download
+    # -----------------------------------------------------------------------
+
+    def download_dce_for_new_records(
+        self,
+        references: List[str],
+        storage_root: Path,
+    ) -> Dict[str, DceDownloadResult]:
+        results: Dict[str, DceDownloadResult] = {}
+        if not references:
+            return results
+
+        session = self._make_session()
+        for reference in references:
+            consultation = self._latest_consultations.get(reference)
+            if consultation is None:
+                results[reference] = DceDownloadResult(
+                    downloaded=False,
+                    error_message="Consultation absente du scrape courant",
+                )
+                continue
+
+            try:
+                zip_path = self._download_dce_zip(session, consultation, storage_root)
+                extracted_dir = self._extract_archive_tree(zip_path)
+                results[reference] = DceDownloadResult(
+                    downloaded=True,
+                    extracted_dir=str(extracted_dir),
+                )
+            except Exception as exc:
+                results[reference] = DceDownloadResult(
+                    downloaded=False,
+                    error_message=str(exc),
+                )
+
+        return results
+
+    def _download_dce_zip(
+        self,
+        session: requests.Session,
+        consultation: Consultation,
+        storage_root: Path,
+    ) -> Path:
+        """
+        Workflow strict :
+        1. GET initial pour récupérer PRADO_PAGESTATE
+        2. POST intermédiaire (anonyme)
+        3. POST final (download)
+        """
+        org_acronyme = self._extract_org_acronyme(consultation.detail_url)
+        if not org_acronyme:
+            raise RuntimeError("orgAcronyme introuvable pour la consultation")
+
+        dce_url = f"{self._DCE_DOWNLOAD_PAGE}&id={consultation.consultation_id}&orgAcronyme={org_acronyme}"
+
+        # 1. GET initial
+        get_resp = session.get(dce_url, timeout=60)
+        get_resp.raise_for_status()
+        prado_pagestate = self._extract_prado_pagestate(get_resp.text)
+
+        # 2. POST intermédiaire (sélection anonyme)
+        inter_payload = self._build_anonymous_intermediate_payload(prado_pagestate)
+        inter_resp = session.post(
+            dce_url,
+            data=inter_payload,
+            timeout=120,
+            allow_redirects=True,
+            headers={"Referer": dce_url, "Origin": self._BASE},
+        )
+        inter_resp.raise_for_status()
+        prado_pagestate_final = self._extract_prado_pagestate(inter_resp.text)
+
+        # 3. POST final (download)
+        final_payload = self._build_final_download_payload(prado_pagestate_final)
+        final_resp = session.post(
+            dce_url,
+            data=final_payload,
+            timeout=300,
+            allow_redirects=True,
+            headers={"Referer": dce_url, "Origin": self._BASE},
+        )
+        final_resp.raise_for_status()
+
+        # Vérification et sauvegarde
+        content_type = final_resp.headers.get("Content-Type", "")
+        if "text/html" in content_type.lower():
+            raise RuntimeError("PLACE a renvoyé du HTML au lieu d'une archive ZIP")
+
+        file_name = self._resolve_zip_filename(final_resp, consultation.consultation_id)
+        target_dir = storage_root / self.source_name().lower() / consultation.consultation_id
+        target_dir.mkdir(parents=True, exist_ok=True)
+        zip_path = target_dir / file_name
+        zip_path.write_bytes(final_resp.content)
+
+        if not zipfile.is_zipfile(zip_path):
+            raise RuntimeError("Le contenu retourné n'est pas une archive ZIP valide")
+        return zip_path
+
+    @staticmethod
+    def _extract_prado_pagestate(html: str) -> str:
+        soup = BeautifulSoup(html, "html.parser")
+        tag = soup.find("input", {"id": "PRADO_PAGESTATE"})
+        if not tag:
+            raise RuntimeError("Champ PRADO_PAGESTATE introuvable.")
+        value = tag.get("value")
+        if not value:
+            raise RuntimeError("Champ PRADO_PAGESTATE vide.")
+        return value
+
+    @staticmethod
+    def _base_payload(prado_pagestate: str) -> dict:
+        return {
+            "ctl0$CONTENU_PAGE$ctl7$idAtexoRef$UrlRef": "",
+            "ctl0$CONTENU_PAGE$ctl7$idAtexoRef$casRef": "",
+            "ctl0$CONTENU_PAGE$ctl7$idAtexoRef$codeRefPrinc": "",
+            "ctl0$CONTENU_PAGE$ctl7$idAtexoRef$codesRefSec": "",
+            "ctl0$CONTENU_PAGE$ctl7$idAtexoRef$defineCodePrincipal": "(Code principal)",
+            "ctl0$CONTENU_PAGE$ctl7$idAtexoRefDomaineActivites$UrlRef": "",
+            "ctl0$CONTENU_PAGE$ctl7$idAtexoRefDomaineActivites$casRef": "",
+            "ctl0$CONTENU_PAGE$ctl7$idAtexoRefDomaineActivites$codeRefPrinc": "",
+            "ctl0$CONTENU_PAGE$ctl7$idAtexoRefDomaineActivites$codesRefSec": "",
+            "ctl0$CONTENU_PAGE$ctl7$idAtexoRefDomaineActivites$defineCodePrincipal": "(Code principal)",
+            "ctl0$atexoUtah$javaVersion": "",
+            "PRADO_PAGESTATE": prado_pagestate,
+        }
+
+    @classmethod
+    def _build_anonymous_intermediate_payload(cls, prado_pagestate: str) -> dict:
+        payload = cls._base_payload(prado_pagestate)
+        payload.update({
+            "ctl0$CONTENU_PAGE$EntrepriseFormulaireDemande$RadioGroup":
+                "ctl0$CONTENU_PAGE$EntrepriseFormulaireDemande$choixAnonyme",
+            "ctl0$CONTENU_PAGE$EntrepriseFormulaireDemande$clientId":
+                "ctl0_CONTENU_PAGE_EntrepriseFormulaireDemande",
+            "ctl0$CONTENU_PAGE$EntrepriseFormulaireDemande$nom": "",
+            "ctl0$CONTENU_PAGE$EntrepriseFormulaireDemande$prenom": "",
+            "ctl0$CONTENU_PAGE$EntrepriseFormulaireDemande$email": "",
+            "ctl0$CONTENU_PAGE$EntrepriseFormulaireDemande$raisonSocial": "",
+            "ctl0$CONTENU_PAGE$EntrepriseFormulaireDemande$etablissementEntreprise":
+                "ctl0$CONTENU_PAGE$EntrepriseFormulaireDemande$france",
+            "ctl0$CONTENU_PAGE$EntrepriseFormulaireDemande$siren": "",
+            "ctl0$CONTENU_PAGE$EntrepriseFormulaireDemande$siret": "",
+            "ctl0$CONTENU_PAGE$EntrepriseFormulaireDemande$pays": "0",
+            "ctl0$CONTENU_PAGE$EntrepriseFormulaireDemande$idNational": "",
+            "ctl0$CONTENU_PAGE$EntrepriseFormulaireDemande$address": "",
+            "ctl0$CONTENU_PAGE$EntrepriseFormulaireDemande$address2": "",
+            "ctl0$CONTENU_PAGE$EntrepriseFormulaireDemande$tel": "",
+            "ctl0$CONTENU_PAGE$EntrepriseFormulaireDemande$cp": "",
+            "ctl0$CONTENU_PAGE$EntrepriseFormulaireDemande$ville": "",
+            "ctl0$CONTENU_PAGE$EntrepriseFormulaireDemande$fax": "",
+            "ctl0$CONTENU_PAGE$validateButton": "Valider",
+            "PRADO_POSTBACK_TARGET": "ctl0$CONTENU_PAGE$validateButton",
+        })
+        return payload
+
+    @classmethod
+    def _build_final_download_payload(cls, prado_pagestate: str) -> dict:
+        payload = cls._base_payload(prado_pagestate)
+        payload.update({
+            "ctl0$CONTENU_PAGE$EntrepriseDownloadDce$voidControl": "",
+            "ctl0$CONTENU_PAGE$EntrepriseDownloadDce$maxIndexPieces": "",
+            "PRADO_POSTBACK_TARGET": "ctl0$CONTENU_PAGE$EntrepriseDownloadDce$completeDownload",
+        })
+        return payload
+
+    @staticmethod
+    def _extract_org_acronyme(detail_url: str) -> str:
+        parsed = urlparse(detail_url)
+        query = parse_qs(parsed.query)
+        return (query.get("orgAcronyme") or [""])[0]
+
+    @staticmethod
+    def _resolve_zip_filename(response: requests.Response, default_name: str) -> str:
+        disposition = response.headers.get("Content-Disposition", "")
+        match = re.search(r'filename="?([^";]+)"?', disposition)
+        if match:
+            return Path(match.group(1)).name
+        return f"{default_name}.zip"
+
+    def _extract_archive_tree(self, zip_path: Path) -> Path:
+        extracted_dir = zip_path.parent / zip_path.stem
+        extracted_dir.mkdir(parents=True, exist_ok=True)
+        self._safe_extract_zip(zip_path, extracted_dir)
+        self._extract_nested_zips(extracted_dir)
+        return extracted_dir
+
+    def _extract_nested_zips(self, root_dir: Path) -> None:
+        queue: List[Path] = [root_dir]
+        while queue:
+            current = queue.pop(0)
+            for nested_zip in current.rglob("*.zip"):
+                nested_target = nested_zip.parent / nested_zip.stem
+                if nested_target.exists() and any(nested_target.iterdir()):
+                    continue
+                nested_target.mkdir(parents=True, exist_ok=True)
+                self._safe_extract_zip(nested_zip, nested_target)
+                queue.append(nested_target)
+
+    @staticmethod
+    def _safe_extract_zip(zip_path: Path, destination: Path) -> None:
+        with zipfile.ZipFile(zip_path, "r") as archive:
+            dest_resolved = destination.resolve()
+            for member in archive.infolist():
+                member_path = (destination / member.filename).resolve()
+                if not str(member_path).startswith(str(dest_resolved)):
+                    raise RuntimeError(f"Archive invalide (zip-slip): {zip_path.name}")
+            archive.extractall(destination)
+

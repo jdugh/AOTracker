@@ -62,7 +62,10 @@ class TrackerDatabase:
                 statut TEXT DEFAULT 'non_lu',
                 date_ajout TEXT,
                 date_modification TEXT,
-                data_source TEXT DEFAULT 'boamp'
+                data_source TEXT DEFAULT 'boamp',
+                dce_downloaded INTEGER,
+                dce_local_path TEXT DEFAULT '',
+                dce_last_error TEXT DEFAULT ''
             )
         ''')
 
@@ -74,6 +77,18 @@ class TrackerDatabase:
             cursor.execute('UPDATE appels_offre SET data_source = "boamp" WHERE data_source IS NULL')
         if 'commentaire' not in columns:
             cursor.execute('ALTER TABLE appels_offre ADD COLUMN commentaire TEXT DEFAULT ""')
+        if 'dce_downloaded' not in columns:
+            cursor.execute('ALTER TABLE appels_offre ADD COLUMN dce_downloaded INTEGER')
+        if 'dce_local_path' not in columns:
+            cursor.execute('ALTER TABLE appels_offre ADD COLUMN dce_local_path TEXT DEFAULT ""')
+        if 'dce_last_error' not in columns:
+            cursor.execute('ALTER TABLE appels_offre ADD COLUMN dce_last_error TEXT DEFAULT ""')
+
+        # Les AO PLACE sont candidats au téléchargement DCE. BOAMP reste à NULL.
+        cursor.execute(
+            'UPDATE appels_offre SET dce_downloaded = 0 '
+            'WHERE data_source = "place" AND dce_downloaded IS NULL'
+        )
 
         conn.commit()
         conn.close()
@@ -102,24 +117,48 @@ class TrackerDatabase:
             cursor.execute('''
                 UPDATE appels_offre
                 SET acheteur=?, montant=?, duree=?, deadline=?, resume=?, mot_cle=?,
-                    date_parution=?, date_modification=?, data_source=?
+                    date_parution=?, date_modification=?, data_source=?,
+                    dce_downloaded = CASE
+                        WHEN ? = 'place' AND dce_downloaded IS NULL THEN 0
+                        ELSE dce_downloaded
+                    END
                 WHERE reference=?
             ''', (acheteur, montant, duree, deadline, resume, mot_cle,
-                  date_parution, now, data_source, reference))
+                  date_parution, now, data_source, data_source, reference))
             result = 'update'
         else:
             cursor.execute('''
                 INSERT INTO appels_offre
                 (reference, acheteur, montant, duree, deadline, resume, mot_cle,
-                 date_parution, statut, date_ajout, date_modification, data_source)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'non_lu', ?, ?, ?)
+                 date_parution, statut, date_ajout, date_modification, data_source, dce_downloaded)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'non_lu', ?, ?, ?, ?)
             ''', (reference, acheteur, montant, duree, deadline, resume, mot_cle,
-                  date_parution, now, now, data_source))
+                  date_parution, now, now, data_source, 0 if data_source == 'place' else None))
             result = 'insert'
 
         conn.commit()
         conn.close()
         return result
+
+    def update_dce_status(
+        self,
+        reference: str,
+        downloaded: bool,
+        local_path: str = "",
+        error_message: str = "",
+    ) -> None:
+        """Met à jour l'état du téléchargement DCE pour un AO."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        cursor.execute(
+            'UPDATE appels_offre '
+            'SET dce_downloaded=?, dce_local_path=?, dce_last_error=?, date_modification=? '
+            'WHERE reference=?',
+            (1 if downloaded else 0, local_path, error_message, now, reference),
+        )
+        conn.commit()
+        conn.close()
 
     def update_statut(self, reference: str, statut: str) -> None:
         """Met à jour le statut d'un AO."""
@@ -195,20 +234,21 @@ class AOPersistence:
     def __init__(self, db_path: str = "tracker.db"):
         self.db = TrackerDatabase(db_path=db_path)
 
-    def persist_records(self, records: List[AORecord]) -> Tuple[int, int]:
+    def persist_records(self, records: List[AORecord]) -> Tuple[List[str], List[str]]:
         """
         Insère ou met à jour une liste d'AORecord.
         Fusionne les mots-clés avec les valeurs existantes.
-        Retourne (nb_inserts, nb_updates).
+        Retourne (references_inserees, references_updatees).
         """
-        inserts = updates = 0
+        inserted_refs: List[str] = []
+        updated_refs: List[str] = []
         for record in records:
             result = self._upsert(record)
             if result == 'insert':
-                inserts += 1
+                inserted_refs.append(record.reference)
             elif result == 'update':
-                updates += 1
-        return inserts, updates
+                updated_refs.append(record.reference)
+        return inserted_refs, updated_refs
 
     def _upsert(self, record: AORecord) -> str:
         """Insert/update un AORecord avec fusion des mots-clés."""

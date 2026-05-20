@@ -9,10 +9,20 @@ sans aucune persistance.
 """
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from configparser import ConfigParser
-from typing import List
+from pathlib import Path
+from typing import Dict, List
 
 from services.database import AORecord
+
+
+@dataclass
+class DceDownloadResult:
+    """Résultat d'un téléchargement DCE pour une référence donnée."""
+    downloaded: bool
+    extracted_dir: str = ""
+    error_message: str = ""
 
 
 class BaseScraper(ABC):
@@ -35,3 +45,16 @@ class BaseScraper(ABC):
     @abstractmethod
     def source_name() -> str:
         """Nom lisible de la source (ex: 'PLACE', 'BOAMP')."""
+
+    def download_dce_for_new_records(
+        self,
+        references: List[str],
+        storage_root: Path,
+    ) -> Dict[str, DceDownloadResult]:
+        """
+        Hook optionnel de téléchargement DCE.
+
+        Implémentation par défaut : source non supportée (ex: BOAMP aujourd'hui).
+        """
+        _ = (references, storage_root)
+        return {}

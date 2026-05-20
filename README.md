@@ -55,6 +55,9 @@ CPV_CODES =
     72000000
     30220000
 
+[DCE]
+STORAGE_PATH = dce_storage
+
 [Affichage]
 Historique = 10
 
@@ -81,7 +84,9 @@ python run_daily.py
 The script:
 1. Scrapes BOAMP and PLACE
 2. Inserts/updates AOs in the database (`tracker.db`)
-3. Sends a notification if new AOs are found
+3. Downloads DCE archives for newly inserted AOs (PLACE only) into `STORAGE_PATH/<scraper_source_name>/<reference>/`
+4. Extracts ZIP archives (including nested ZIP files)
+5. Sends a notification if new AOs are found
 
 ## Architecture
 

@@ -10,3 +10,6 @@ CPV_CODES =
     30220000
     38221000
     48326000
+
+[DCE]
+STORAGE_PATH = dce_storage
