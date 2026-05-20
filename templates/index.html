@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BOAMP Extractor - Suivi des Appels d'Offre</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.datatables.net/1.13.6/css/dataTables.bootstrap5.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css">
+    <style>
+        body { padding: 20px; background: #f5f5f5; }
+        .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; border-radius: 10px; margin-bottom: 30px; }
+        .stat-card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 15px; }
+        .table-container { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .urgence-red { background-color: #fee; border-left: 4px solid #dc3545; }
+        .urgence-yellow { background-color: #fffbeb; border-left: 4px solid #ffc107; }
+        .urgence-green { background-color: #f0fdf4; border-left: 4px solid #28a745; }
+        .badge-fire { background: linear-gradient(45deg, #ff6b6b, #ee5a24); }
+        .checkbox-group { display: flex; gap: 10px; }
+        .status-badge { font-size: 0.8em; padding: 4px 8px; border-radius: 4px; }
+        .btn-status { padding: 2px 8px; font-size: 0.75em; }
+        tr.statut-a_suivre td { background-color: #d1e7dd !important; }
+        tr.statut-ne_pas_suivre td { background-color: #f8d7da !important; }
+        tr.statut-deja_lu td { background-color: #cff4fc !important; }
+        tr.statut-a_repondre td { background-color: #fff3cd !important; }
+        tr.statut-delai_depasse td { background-color: #e2e3e5 !important; }
+        #aoTable thead th select { font-size: 0.8em; padding: 2px 4px; width: 100%; margin-top: 4px; border: 1px solid #ccc; border-radius: 4px; }
+        .statut-dropdown { position: relative; display: inline-block; width: 100%; margin-top: 4px; }
+        .statut-dropdown-btn { font-size: 0.8em; padding: 2px 6px; width: 100%; border: 1px solid #ccc; border-radius: 4px; background: white; cursor: pointer; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .statut-dropdown-menu { display: none; position: absolute; z-index: 9999; background: white; border: 1px solid #ccc; border-radius: 4px; box-shadow: 0 2px 6px rgba(0,0,0,0.15); min-width: 150px; padding: 4px 0; }
+        .statut-dropdown-menu.open { display: block; }
+        .statut-dropdown-menu label { display: flex; align-items: center; gap: 6px; padding: 4px 10px; font-size: 0.85em; cursor: pointer; white-space: nowrap; margin: 0; }
+        .statut-dropdown-menu label:hover { background: #f0f0f0; }
+    </style>
+</head>
+<body>
+    <div class="container-fluid">
+        <!-- En-tête -->
+        <div class="header">
+            <h1><i class="bi bi-search"></i> AO Tracker</h1>
+            <p class="mb-0">Suivi des annonces de marchés publics</p>
+        </div>
+
+        <!-- Statistiques -->
+        <div class="row mb-4">
+            <div class="col-md-2">
+                <div class="stat-card text-center">
+                    <h3 class="text-primary">{{ stats.total }}</h3>
+                    <small class="text-muted">Total AO</small>
+                </div>
+            </div>
+            <div class="col-md-2">
+                <div class="stat-card text-center">
+                    <h3 class="text-warning">{{ stats.non_lu }}</h3>
+                    <small class="text-muted">Non lus</small>
+                </div>
+            </div>
+            <div class="col-md-2">
+                <div class="stat-card text-center">
+                    <h3 class="text-success">{{ stats.a_suivre }}</h3>
+                    <small class="text-muted">À suivre</small>
+                </div>
+            </div>
+            <div class="col-md-2">
+                <div class="stat-card text-center">
+                    <h3 class="text-info">{{ stats.deja_lu }}</h3>
+                    <small class="text-muted">Déjà lus</small>
+                </div>
+            </div>
+            <div class="col-md-2">
+                <div class="stat-card text-center">
+                    <h3 class="text-danger">{{ stats.ne_pas_suivre }}</h3>
+                    <small class="text-muted">Ne pas suivre</small>
+                </div>
+            </div>
+        </div>
+
+        <!-- Filtres -->
+        <div class="mb-3">
+            <button class="btn btn-sm btn-outline-primary" onclick="filterByStatut('all')">Tous</button>
+            <button class="btn btn-sm btn-outline-warning" onclick="filterByStatut('non_lu')">Non lus</button>
+            <button class="btn btn-sm btn-outline-success" onclick="filterByStatut('a_suivre')">À suivre</button>
+            <button class="btn btn-sm btn-outline-warning" onclick="filterByStatut('a_repondre')">À répondre</button>
+            <button class="btn btn-sm btn-outline-danger" onclick="filterByStatut('ne_pas_suivre')">Ne pas suivre</button>
+            <button class="btn btn-sm btn-outline-secondary" onclick="filterByStatut('delai_depasse')">Délai dépassé</button>
+        </div>
+
+        <!-- Tableau -->
+        <div class="table-container">
+            <table id="aoTable" class="table table-hover table-sm">
+                <thead>
+                    <tr>
+                        <th>Référence</th>
+                        <th>Acheteur</th>
+                        <th>Deadline</th>
+                        <th>Date parution</th>
+                        <th>Résumé</th>
+                        <th>Mot-clé</th>
+                        <th>Source</th>
+                        <th>Statut</th>
+                        <th>Commentaire</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="aoTableBody">
+                    <!-- Rempli dynamiquement -->
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.datatables.net/1.13.6/js/jquery.dataTables.min.js"></script>
+    <script src="https://cdn.datatables.net/1.13.6/js/dataTables.bootstrap5.min.js"></script>
+    
+    <script>
+        let table;
+        let currentFilter = 'all';
+        const tbody = document.getElementById('aoTableBody');
+        tbody.innerHTML = '';
+
+        // Filtre multi-select sur la colonne Statut
+        var selectedStatuts = [];
+        $.fn.dataTable.ext.search.push(function(settings, data, dataIndex) {
+            if (selectedStatuts.length === 0) return true;
+            var cellHtml = data[7] || '';
+            return selectedStatuts.some(function(val) {
+                return cellHtml.indexOf(val) !== -1;
+            });
+        });
+
+        // Initialiser DataTables
+        table = $('#aoTable').DataTable({
+            language: {
+                "sProcessing": "Traitement en cours...",
+                "sSearch": "Rechercher&nbsp;:",
+                "sLengthMenu": "Afficher _MENU_ éléments",
+                "sInfo": "Affichage de l'élément _START_ à _END_ sur _TOTAL_ éléments",
+                "sInfoEmpty": "Affichage de l'élément 0 à 0 sur 0 élément",
+                "sInfoFiltered": "(filtré de _MAX_ éléments au total)",
+                "sInfoPostFix": "",
+                "sLoadingRecords": "Chargement en cours...",
+                "sZeroRecords": "Aucun élément à afficher",
+                "sEmptyTable": "Aucune donnée disponible dans le tableau",
+                "oPaginate": {
+                    "sFirst": "Premier",
+                    "sPrevious": "Précédent",
+                    "sNext": "Suivant",
+                    "sLast": "Dernier"
+                },
+                "oAria": {
+                    "sSortAscending": ": activer pour trier la colonne par ordre croissant",
+                    "sSortDescending": ": activer pour trier la colonne par ordre décroissant"
+                },
+                "select": {
+                    "rows": {
+                        "_": "%d lignes sélectionnées",
+                        "0": "Aucune ligne sélectionnée",
+                        "1": "1 ligne sélectionnée"
+                    }
+                }
+            },
+            pageLength: 25,
+            order: [[2, 'asc']],  // Trier par deadline
+            initComplete: function() {
+                // Filtre dropdown à cases à cocher sur la colonne Source (index 6)
+                var sourceHeader = $(this.api().column(6).header());
+                var sources = [
+                    { val: 'boamp', label: 'boamp' },
+                    { val: 'place', label: 'place' }
+                ];
+                var sourceDropdownHtml = '<div class="statut-dropdown" onclick="event.stopPropagation()">' +
+                    '<button type="button" class="statut-dropdown-btn" id="sourceDropdownBtn">Toutes &#9660;</button>' +
+                    '<div class="statut-dropdown-menu" id="sourceDropdownMenu">';
+                sources.forEach(function(s) {
+                    sourceDropdownHtml += '<label><input type="checkbox" value="' + s.val + '"> ' + s.label + '</label>';
+                });
+                sourceDropdownHtml += '</div></div>';
+                sourceHeader.append('<br>').append($(sourceDropdownHtml));
+
+                $('#sourceDropdownBtn').on('click', function() {
+                    $('#sourceDropdownMenu').toggleClass('open');
+                });
+                $(document).on('click', function() {
+                    $('#sourceDropdownMenu').removeClass('open');
+                });
+                $('#sourceDropdownMenu input[type=checkbox]').on('change', function() {
+                    var selectedSources = $('#sourceDropdownMenu input:checked').map(function() {
+                        return $(this).val();
+                    }).get();
+                    var label = selectedSources.length === 0 ? 'Toutes &#9660;' : selectedSources.length + ' s\u00e9lectionn\u00e9e(s) &#9660;';
+                    $('#sourceDropdownBtn').html(label);
+                    if (selectedSources.length === 0) {
+                        table.column(6).search('', false, false).draw();
+                    } else {
+                        table.column(6).search(selectedSources.join('|'), true, false).draw();
+                    }
+                });
+
+                // Filtre dropdown à cases à cocher sur la colonne Statut (index 7)
+                var statutHeader = $(this.api().column(7).header());
+                var statuts = [
+                    { val: 'Non lu',        label: 'Non lu' },
+                    { val: '\u00c0 suivre', label: '\u00c0 suivre' },
+                    { val: '\u00c0 r\u00e9pondre', label: '\u00c0 r\u00e9pondre' },
+                    { val: 'Ne pas suivre', label: 'Ne pas suivre' },
+                    { val: 'D\u00e9lai d\u00e9pass\u00e9', label: 'D\u00e9lai d\u00e9pass\u00e9' }
+                ];
+                var dropdownHtml = '<div class="statut-dropdown" onclick="event.stopPropagation()">' +
+                    '<button type="button" class="statut-dropdown-btn" id="statutDropdownBtn">Tous &#9660;</button>' +
+                    '<div class="statut-dropdown-menu" id="statutDropdownMenu">';
+                statuts.forEach(function(s) {
+                    dropdownHtml += '<label><input type="checkbox" value="' + s.val + '"> ' + s.label + '</label>';
+                });
+                dropdownHtml += '</div></div>';
+                statutHeader.append('<br>').append($(dropdownHtml));
+
+                $('#statutDropdownBtn').on('click', function() {
+                    $('#statutDropdownMenu').toggleClass('open');
+                });
+                $(document).on('click', function() {
+                    $('#statutDropdownMenu').removeClass('open');
+                });
+                $('#statutDropdownMenu input[type=checkbox]').on('change', function() {
+                    selectedStatuts = $('#statutDropdownMenu input:checked').map(function() {
+                        return $(this).val();
+                    }).get();
+                    var label = selectedStatuts.length === 0 ? 'Tous &#9660;' : selectedStatuts.length + ' s\u00e9lectionn\u00e9(s) &#9660;';
+                    $('#statutDropdownBtn').html(label);
+                    table.draw();
+                });
+            }
+        });
+
+        function loadData(filtre = null) {
+            const url = filtre ? `/api/appels_offre?statut=${filtre}` : '/api/appels_offre';
+            
+            fetch(url)
+                .then(response => response.json())
+                .then(data => {
+                    table.clear();
+                    data.forEach(ao => {
+                        const row = createRowData(ao);
+                        table.row.add($(createRowElement(ao)));
+                    });
+                    table.draw();
+                });
+        }
+
+        function createRowElement(ao) {
+            const tr = document.createElement('tr');
+            const statutClass = (ao.statut && ao.statut !== 'non_lu') ? ` statut-${ao.statut}` : '';
+            tr.className = `urgence-${ao.urgence}${statutClass}`;
+            
+            const refLink = ao.data_source === 'boamp'
+                ? `<a href="https://www.boamp.fr/avis/detail/${ao.reference}" target="_blank">${ao.reference}</a>`
+                : ao.data_source === 'place'
+                ? `<a href="https://www.marches-publics.gouv.fr/app.php/entreprise/consultation/${ao.reference}" target="_blank">${ao.reference}</a>`
+                : ao.reference;
+            const refCell = ao.is_new ? `🔥 ${refLink}` : refLink;
+            
+            const urgenceIcon = ao.urgence === 'red' ? '🔴' : ao.urgence === 'yellow' ? '🟡' : ao.urgence === 'green' ? '🟢' : '';
+            
+            const statutBadges = {
+                'non_lu': '<span class="badge bg-warning">Non lu</span>',
+                'a_suivre': '<span class="badge bg-success">À suivre</span>',
+                'deja_lu': '<span class="badge bg-info">Déjà lu</span>',
+                'a_repondre': '<span class="badge bg-warning text-dark">À répondre</span>',
+                'ne_pas_suivre': '<span class="badge bg-danger">Ne pas suivre</span>',
+                'delai_depasse': '<span class="badge bg-secondary">Délai dépassé</span>'
+            };
+            
+            tr.innerHTML = `
+                <td>${refCell}</td>
+                <td>${ao.acheteur}</td>
+                <td>${urgenceIcon} ${ao.deadline}</td>
+                <td>${ao.date_parution}</td>
+                <td style="max-width: 300px; overflow: hidden; text-overflow: ellipsis;">${ao.resume}</td>
+                <td><em>${ao.mot_cle}</em></td>
+                <td><span class="badge ${ao.data_source === 'place' ? 'bg-primary' : 'bg-secondary'}">${ao.data_source || 'boamp'}</span></td>
+                <td>${statutBadges[ao.statut] || ao.statut}</td>
+                <td><textarea class="form-control form-control-sm" rows="1" style="resize:vertical; min-height:30px;" onblur="saveCommentaire('${ao.reference}', this)" placeholder="...">${(ao.commentaire || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</textarea></td>
+                <td>
+                    <div class="btn-group btn-group-sm">
+                        <button class="btn btn-status btn-outline-success" onclick="updateStatut('${ao.reference}', 'a_suivre', this)" title="Marquer comme À suivre - AO intéressant à surveiller">
+                            <i class="bi bi-bookmark-star"></i>
+                        </button>
+                        <button class="btn btn-status btn-outline-danger" onclick="updateStatut('${ao.reference}', 'ne_pas_suivre', this)" title="Marquer comme Ne pas suivre - AO non pertinent">
+                            <i class="bi bi-x-circle"></i>
+                        </button>
+                        <button class="btn btn-status btn-outline-warning" onclick="updateStatut('${ao.reference}', 'a_repondre', this)" title="Marquer comme À répondre - AO nécessitant une réponse">
+                            <i class="bi bi-send"></i>
+                        </button>
+                        <button class="btn btn-status btn-outline-secondary" onclick="updateStatut('${ao.reference}', 'delai_depasse', this)" title="Marquer comme Délai dépassé - AO dont la date limite est passée">
+                            <i class="bi bi-clock-history"></i>
+                        </button>
+                    </div>
+                </td>
+            `;
+            
+            return tr;
+        }
+
+        function createRow(ao) {
+            return createRowElement(ao);
+        }
+
+        function createRowData(ao) {
+            // Pour compatibilité
+            return ao;
+        }
+
+        function updateStatut(reference, statut, btn) {
+            fetch('/api/update_statut', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ reference, statut })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    const row = btn.closest('tr');
+                    row.classList.remove('statut-a_suivre', 'statut-ne_pas_suivre', 'statut-deja_lu', 'statut-a_repondre', 'statut-delai_depasse');
+                    row.classList.add(`statut-${statut}`);
+                    const statutBadges = {
+                        'a_suivre': '<span class="badge bg-success">À suivre</span>',
+                        'deja_lu': '<span class="badge bg-info">Déjà lu</span>',
+                        'a_repondre': '<span class="badge bg-warning text-dark">À répondre</span>',
+                        'ne_pas_suivre': '<span class="badge bg-danger">Ne pas suivre</span>',
+                        'delai_depasse': '<span class="badge bg-secondary">Délai dépassé</span>'
+                    };
+                    row.cells[7].innerHTML = statutBadges[statut] || statut;
+                } else {
+                    alert('Erreur lors de la mise à jour du statut');
+                }
+            })
+            .catch(() => {
+                alert('Erreur réseau lors de la mise à jour du statut');
+            });
+        }
+
+        function saveCommentaire(reference, input) {
+            fetch('/api/update_commentaire', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ reference, commentaire: input.value })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (!data.success) {
+                    alert('Erreur lors de la sauvegarde du commentaire');
+                }
+            })
+            .catch(() => {
+                alert('Erreur réseau lors de la sauvegarde du commentaire');
+            });
+        }
+
+        function filterByStatut(statut) {
+            currentFilter = statut;
+            loadData(statut === 'all' ? null : statut);
+        }
+
+        function updateStats() {
+            fetch('/api/stats')
+                .then(response => response.json())
+                .then(stats => {
+                    location.reload(); // Simple reload pour mettre à jour les stats
+                });
+        }
+
+        // Charger les données au démarrage
+        loadData();
+    </script>
+</body>
+</html>
