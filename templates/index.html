@@ -31,6 +31,17 @@
         .statut-dropdown-menu.open { display: block; }
         .statut-dropdown-menu label { display: flex; align-items: center; gap: 6px; padding: 4px 10px; font-size: 0.85em; cursor: pointer; white-space: nowrap; margin: 0; }
         .statut-dropdown-menu label:hover { background: #f0f0f0; }
+        .summary-toggle-btn { min-width: 26px; padding: 2px 6px; }
+        .summary-card { background: #fafcff; border: 1px solid #d9e8ff; border-radius: 8px; padding: 14px; margin: 8px 0; }
+        .summary-markdown { font-size: 0.95em; line-height: 1.45; }
+        .summary-markdown h1, .summary-markdown h2, .summary-markdown h3, .summary-markdown h4 { margin-top: 0.6rem; }
+        .summary-section-title { font-weight: 700; margin: 0.8rem 0 0.4rem; }
+        .summary-badge { margin-right: 6px; margin-bottom: 6px; }
+        .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin-top: 10px; }
+        .summary-kpi { background: white; border: 1px solid #e6eefc; border-radius: 8px; padding: 10px; }
+        .summary-kpi-label { font-size: 0.8em; color: #6c757d; }
+        .summary-kpi-value { font-weight: 700; }
+        .detail-row td { padding: 0.25rem 0.5rem 0.75rem 0.5rem !important; }
     </style>
 </head>
 <body>
@@ -113,10 +124,13 @@
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdn.datatables.net/1.13.6/js/jquery.dataTables.min.js"></script>
     <script src="https://cdn.datatables.net/1.13.6/js/dataTables.bootstrap5.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
     
     <script>
         let table;
         let currentFilter = 'all';
+        const summaryCache = {};
         const tbody = document.getElementById('aoTableBody');
         tbody.innerHTML = '';
 
@@ -283,6 +297,9 @@
                 <td><textarea class="form-control form-control-sm" rows="1" style="resize:vertical; min-height:30px;" onblur="saveCommentaire('${ao.reference}', this)" placeholder="...">${(ao.commentaire || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</textarea></td>
                 <td>
                     <div class="btn-group btn-group-sm">
+                        <button class="btn btn-status btn-outline-primary summary-toggle-btn" onclick="toggleSummaryPanel('${ao.reference}', this)" title="Afficher/Masquer le résumé DCE">
+                            <i class="bi bi-chevron-double-down"></i>
+                        </button>
                         <button class="btn btn-status btn-outline-success" onclick="updateStatut('${ao.reference}', 'a_suivre', this)" title="Marquer comme À suivre - AO intéressant à surveiller">
                             <i class="bi bi-bookmark-star"></i>
                         </button>
@@ -309,6 +326,149 @@
         function createRowData(ao) {
             // Pour compatibilité
             return ao;
+        }
+
+        function escapeHtml(value) {
+            if (value === null || value === undefined) return '';
+            return String(value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/\"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+        }
+
+        function renderList(items, emptyText = 'Non renseigné') {
+            if (!Array.isArray(items) || items.length === 0) {
+                return `<p class="text-muted mb-1">${emptyText}</p>`;
+            }
+            return '<ul class="mb-2">' + items.map(item => `<li>${escapeHtml(item)}</li>`).join('') + '</ul>';
+        }
+
+        function renderTechBadges(items) {
+            if (!Array.isArray(items) || items.length === 0) {
+                return '<p class="text-muted mb-1">Non renseigné</p>';
+            }
+            return items.map(item => `<span class="badge bg-primary-subtle text-primary-emphasis border summary-badge">${escapeHtml(item)}</span>`).join('');
+        }
+
+        function formatLots(value) {
+            if (value === true) return 'Oui';
+            if (value === false) return 'Non';
+            return 'N/C';
+        }
+
+        function riskBadgeClass(level) {
+            const normalized = (level || '').toString().toUpperCase();
+            if (normalized === 'LOW') return 'bg-success';
+            if (normalized === 'MEDIUM') return 'bg-warning text-dark';
+            if (normalized === 'HIGH') return 'bg-danger';
+            return 'bg-secondary';
+        }
+
+        function buildSummaryPanel(summaryData) {
+            if (!summaryData || !summaryData.exists) {
+                const message = summaryData && summaryData.message ? summaryData.message : 'Aucun summary.json trouvé pour cet AO.';
+                return `<div class="summary-card"><p class="mb-0 text-muted">${escapeHtml(message)}</p></div>`;
+            }
+
+            const markdownRaw = summaryData.markdown_summary || '';
+            const markdownHtml = DOMPurify.sanitize(marked.parse(markdownRaw));
+            const structured = summaryData.structured_output || {};
+            const riskLevel = structured.solo_risk_level || 'N/C';
+
+            return `
+                <div class="summary-card">
+                    <div class="summary-markdown mb-3">${markdownHtml || '<p class="text-muted">Résumé markdown non disponible.</p>'}</div>
+                    <div class="summary-grid">
+                        <div class="summary-kpi">
+                            <div class="summary-kpi-label">Résumé court</div>
+                            <div class="summary-kpi-value">${escapeHtml(structured.summary_short || 'N/C')}</div>
+                        </div>
+                        <div class="summary-kpi">
+                            <div class="summary-kpi-label">Prix estimé</div>
+                            <div class="summary-kpi-value">${escapeHtml(structured.estimated_amount || 'N/C')}</div>
+                        </div>
+                        <div class="summary-kpi">
+                            <div class="summary-kpi-label">AO allotié</div>
+                            <div class="summary-kpi-value">${formatLots(structured.lots)}</div>
+                        </div>
+                        <div class="summary-kpi">
+                            <div class="summary-kpi-label">Score réponse solo</div>
+                            <div class="summary-kpi-value">${escapeHtml(structured.solo_fit_score || 'N/C')}</div>
+                        </div>
+                        <div class="summary-kpi">
+                            <div class="summary-kpi-label">Risque réponse solo</div>
+                            <div class="summary-kpi-value"><span class="badge ${riskBadgeClass(riskLevel)}">${escapeHtml(riskLevel)}</span></div>
+                        </div>
+                    </div>
+
+                    <div class="summary-section-title">Technologies</div>
+                    <div class="mb-2">${renderTechBadges(structured.technologies)}</div>
+
+                    <div class="summary-section-title">Certifications obligatoires</div>
+                    ${renderList(structured.required_certifications)}
+
+                    <div class="summary-section-title">Points bloquants</div>
+                    ${renderList(structured.blocking_requirements)}
+
+                    <div class="summary-section-title">Points de vigilance</div>
+                    ${renderList(structured.vigilance_points)}
+                </div>
+            `;
+        }
+
+        function closeOtherDetails(exceptRowNode) {
+            table.rows().every(function() {
+                if (this.child.isShown() && this.node() !== exceptRowNode) {
+                    this.child.hide();
+                    $(this.node()).removeClass('shown');
+                    const toggleBtn = this.node().querySelector('.summary-toggle-btn i');
+                    if (toggleBtn) {
+                        toggleBtn.classList.remove('bi-chevron-double-up');
+                        toggleBtn.classList.add('bi-chevron-double-down');
+                    }
+                }
+            });
+        }
+
+        function toggleSummaryPanel(reference, btn) {
+            const rowNode = btn.closest('tr');
+            const row = table.row(rowNode);
+            const icon = btn.querySelector('i');
+
+            if (row.child.isShown()) {
+                row.child.hide();
+                $(rowNode).removeClass('shown');
+                if (icon) {
+                    icon.classList.remove('bi-chevron-double-up');
+                    icon.classList.add('bi-chevron-double-down');
+                }
+                return;
+            }
+
+            closeOtherDetails(rowNode);
+            row.child('<div class="summary-card"><div class="text-muted">Chargement du résumé...</div></div>', 'detail-row').show();
+            $(rowNode).addClass('shown');
+            if (icon) {
+                icon.classList.remove('bi-chevron-double-down');
+                icon.classList.add('bi-chevron-double-up');
+            }
+
+            if (summaryCache[reference]) {
+                row.child(buildSummaryPanel(summaryCache[reference]), 'detail-row').show();
+                return;
+            }
+
+            fetch(`/api/ao_summary/${encodeURIComponent(reference)}`)
+                .then(response => response.json())
+                .then(data => {
+                    summaryCache[reference] = data;
+                    row.child(buildSummaryPanel(data), 'detail-row').show();
+                })
+                .catch(() => {
+                    row.child('<div class="summary-card"><p class="mb-0 text-danger">Erreur réseau lors du chargement du summary.</p></div>', 'detail-row').show();
+                });
         }
 
         function updateStatut(reference, statut, btn) {

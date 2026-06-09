@@ -6,9 +6,13 @@
 from flask import Flask, render_template, request, jsonify
 from database import TrackerDatabase
 from datetime import datetime, timedelta
+from pathlib import Path
+import json
+import re
 
 app = Flask(__name__)
 db = TrackerDatabase()
+PLACE_SUMMARY_ROOT = Path('dce_storage') / 'place'
 
 @app.route('/')
 def index():
@@ -59,6 +63,50 @@ def update_commentaire():
 def get_stats():
     """API pour récupérer les statistiques"""
     return jsonify(db.get_stats())
+
+
+@app.route('/api/ao_summary/<reference>')
+def get_ao_summary(reference):
+    """API pour récupérer le contenu summary.json d'un AO PLACE."""
+    if not re.match(r'^[A-Za-z0-9_-]+$', reference):
+        return jsonify({'error': 'Invalid reference'}), 400
+
+    ao = db.get_by_reference(reference)
+    if not ao:
+        return jsonify({'success': False, 'exists': False, 'message': 'AO introuvable'}), 404
+
+    summary_path = None
+    local_path = (ao.get('dce_local_path') or '').strip()
+    if local_path:
+        candidate = Path(local_path) / 'summary.json'
+        if candidate.exists() and candidate.is_file():
+            summary_path = candidate
+
+    if summary_path is None:
+        fallback = PLACE_SUMMARY_ROOT / reference / 'summary.json'
+        if fallback.exists() and fallback.is_file():
+            summary_path = fallback
+
+    if summary_path is None:
+        return jsonify({
+            'success': True,
+            'exists': False,
+            'message': 'summary.json non disponible pour cet AO'
+        })
+
+    try:
+        with summary_path.open('r', encoding='utf-8') as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return jsonify({'success': False, 'exists': False, 'message': 'summary.json invalide'}), 500
+
+    return jsonify({
+        'success': True,
+        'exists': True,
+        'reference': reference,
+        'markdown_summary': data.get('markdown_summary', ''),
+        'structured_output': data.get('structured_output', {}),
+    })
 
 def get_urgence_level(deadline_str):
     """Détermine le niveau d'urgence (rouge/jaune/vert)"""
